@@ -50,8 +50,9 @@ def main():
         for regex in rules:
             regexes[regex] = rules[regex]
     do_entropy = str2bool(args.do_entropy)
-    output = find_strings(args.git_url, args.since_commit, args.max_depth, args.output_json, args.do_regex, do_entropy)
-    project_path = output["project_path"]
+    results = find_strings(args.git_url, args.since_commit, args.max_depth, args.do_regex, do_entropy)
+    print_results(args.output_json, results)
+    project_path = results["project_path"]
     shutil.rmtree(project_path, onerror=del_rw)
 
 
@@ -269,8 +270,6 @@ def find_strings(git_url, since_commit=None, max_depth=None, printJson=False,
                         found_regexes = regex_check(printableDiff, commit_time, branch_name,
                                                     prev_commit, blob, commitHash, custom_regexes)
                         foundIssues += found_regexes
-                    for foundIssue in foundIssues:
-                        print_results(printJson, foundIssue)
                     output["foundIssues"] += foundIssues
 
             prev_commit = curr_commit
