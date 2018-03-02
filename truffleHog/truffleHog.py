@@ -12,7 +12,7 @@ import os
 import re
 import json
 import stat
-from git import Repo
+from git import Repo, NULL_TREE
 from git.exc import GitCommandError
 try:
     from defaultRegexes.regexChecks import regexes
@@ -51,6 +51,7 @@ def main():
             regexes[regex] = rules[regex]
     do_entropy = str2bool(args.do_entropy)
     results = find_strings(args.git_url, args.since_commit, args.max_depth, args.do_regex, do_entropy)
+    #print(results)
     print_results(args.output_json, results)
     project_path = results["project_path"]
     shutil.rmtree(project_path, onerror=del_rw)
@@ -162,8 +163,9 @@ def print_results(printJson, issue):
         print("~~~~~~~~~~~~~~~~~~~~~")
 
 
-def find_entropy(printableDiff, commit_time, branch_name, prev_commit, blob, commitHash):
+def find_entropy(blob):
     stringsFound = []
+    printableDiff = blob.diff.decode('utf-8', errors='replace')
     lines = printableDiff.split("\n")
     for line in lines:
         for word in line.split():
@@ -179,22 +181,10 @@ def find_entropy(printableDiff, commit_time, branch_name, prev_commit, blob, com
                 if hexEntropy > 3:
                     stringsFound.append(string)
                     printableDiff = printableDiff.replace(string, bcolors.WARNING + string + bcolors.ENDC)
-    entropicDiff = None
-    if len(stringsFound) > 0:
-        entropicDiff = {}
-        entropicDiff['date'] = commit_time
-        entropicDiff['path'] = blob.b_path if blob.b_path else blob.a_path
-        entropicDiff['branch'] = branch_name
-        entropicDiff['commit'] = prev_commit.message
-        entropicDiff['diff'] = blob.diff.decode('utf-8', errors='replace')
-        entropicDiff['stringsFound'] = stringsFound
-        entropicDiff['printDiff'] = printableDiff
-        entropicDiff['commitHash'] = commitHash
-        entropicDiff['reason'] = "High Entropy"
-    return entropicDiff
+    return [{'Reason': "High Entropy", "stringsFound": s} for s in stringsFound]
 
 
-def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, commitHash, custom_regexes={}):
+def regex_check(printableDiff, commit_time, branch_name, commit, blob, commitHash, custom_regexes={}):
     if custom_regexes:
         secret_regexes = custom_regexes
     else:
@@ -209,7 +199,7 @@ def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, comm
             foundRegex['date'] = commit_time
             foundRegex['path'] = blob.b_path if blob.b_path else blob.a_path
             foundRegex['branch'] = branch_name
-            foundRegex['commit'] = prev_commit.message
+            foundRegex['commit'] = commit.message
             foundRegex['diff'] = blob.diff.decode('utf-8', errors='replace')
             foundRegex['stringsFound'] = found_strings
             foundRegex['printDiff'] = found_diff
@@ -219,8 +209,39 @@ def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, comm
     return regex_matches
 
 
-def find_strings(git_url, since_commit=None, max_depth=None, printJson=False,
-                 do_regex=False, do_entropy=True, custom_regexes={}):
+def analyse_commit(commit, do_regex=False, do_entropy=True, custom_regexes={}):
+    try:
+        diff = commit.diff(commit.parents[0], create_patch=True)
+    except IndexError:  # surely this is the initial commit
+        diff = commit.diff(NULL_TREE, create_patch=True)
+    commitHash = commit.hexsha
+    foundIssues = []
+    strings_found = []
+    for blob in diff:
+        printableDiff = blob.diff.decode('utf-8', errors='replace')
+        if printableDiff.startswith("Binary files"):
+            continue
+        commit_time = datetime.datetime.fromtimestamp(commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
+        if do_entropy:
+            strings_found.extend(find_entropy(blob))
+        if do_regex:
+            strings_found.extend(regex_check(blob, custom_regexes))
+        for string in strings_found:
+            foundIssues.append({
+                'date': commit_time,
+                'path': blob.b_path if blob.b_path else blob.a_path,
+                'branch': 'branch name here',
+                'commit': commit.message,
+                'diff': printableDiff,
+                'printDiff': printableDiff,
+                'commitHash': commitHash,
+                'reason': string['Reason'],
+                'stringsFound': string['stringsFound']
+            })
+    return foundIssues
+
+
+def find_strings(git_url, since_commit=None, max_depth=None, do_regex=False, do_entropy=True, custom_regexes={}):
     output = {"foundIssues": []}
     project_path = clone_git_repo(git_url)
     repo = Repo(project_path)
@@ -253,24 +274,8 @@ def find_strings(git_url, since_commit=None, max_depth=None, printJson=False,
                     continue
                 already_searched.add(hashes)
 
-                diff = prev_commit.diff(curr_commit, create_patch=True)
-                for blob in diff:
-                    printableDiff = blob.diff.decode('utf-8', errors='replace')
-                    if printableDiff.startswith("Binary files"):
-                        continue
-                    commit_time = datetime.datetime.fromtimestamp(
-                        prev_commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
-                    foundIssues = []
-                    if do_entropy:
-                        entropicDiff = find_entropy(printableDiff, commit_time,
-                                                    branch_name, prev_commit, blob, commitHash)
-                        if entropicDiff:
-                            foundIssues.append(entropicDiff)
-                    if do_regex:
-                        found_regexes = regex_check(printableDiff, commit_time, branch_name,
-                                                    prev_commit, blob, commitHash, custom_regexes)
-                        foundIssues += found_regexes
-                    output["foundIssues"] += foundIssues
+                # diff = prev_commit.diff(curr_commit, create_patch=True)
+                output['foundIssues'].extend(analyse_commit(curr_commit))
 
             prev_commit = curr_commit
     output["project_path"] = project_path
